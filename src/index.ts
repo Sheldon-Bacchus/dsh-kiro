@@ -163,6 +163,9 @@ const DEFAULT_MODELS: KiroCatalogModel[] = [
   { id: 'claude-opus-4.7', name: 'Claude Opus 4.7', contextWindow: CONTEXT_1M, thinking: true, inputModalities: VISION },
   { id: 'claude-opus-4.8', name: 'Claude Opus 4.8', contextWindow: CONTEXT_1M, thinking: true, inputModalities: VISION },
   { id: 'claude-opus-5', name: 'Claude Opus 5', contextWindow: CONTEXT_1M, thinking: true, inputModalities: VISION },
+  { id: 'claude-opus-5.5', name: 'Claude Opus 5.5', contextWindow: CONTEXT_1M, thinking: true, inputModalities: VISION },
+  { id: 'claude-sonnet-5.5', name: 'Claude Sonnet 5.5', contextWindow: CONTEXT_1M, thinking: true, inputModalities: VISION },
+  { id: 'claude-haiku-5.5', name: 'Claude Haiku 5.5', contextWindow: CONTEXT_1M, thinking: false, inputModalities: VISION },
   { id: 'claude-haiku-4.5', name: 'Claude Haiku 4.5', thinking: false, inputModalities: VISION },
   { id: 'deepseek-3.2', name: 'DeepSeek 3.2', thinking: true, inputModalities: VISION },
   // The catalog reports these two as text-only; declaring images would send
