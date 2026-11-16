@@ -671,7 +671,7 @@ export function registerWebApi(ctx: Context, dependencies: WebDependencies): voi
               const connection = dependencies.options()
               const usage = await dependencies.usage.get(
                 connection,
-                AbortSignal.timeout(15_000),
+                undefined,
                 request.method === 'POST',
               )
               sendJson(response, 200, { ok: true, value: usage })

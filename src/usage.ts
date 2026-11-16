@@ -6,7 +6,9 @@ import type { KiroAuthMethod, KiroToken } from './auth.ts'
 import { getJson, postJsonWithHeaders } from './transport.ts'
 
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000
-const KIRO_USER_AGENT = 'aws-sdk-js/3.738.0 KiroIDE'
+const KIRO_USER_AGENT = 'aws-sdk-js/3.738.0 KiroIDE-1.0.0'
+/** Per-attempt budget for one usage request: the three endpoints are alternatives, not shares of one budget. */
+const USAGE_ATTEMPT_TIMEOUT_MS = 30_000
 /**
  * Limit value Kiro publishes for a plan with no usable bound. The installed
  * client treats a limit at or above it as "no limit" rather than a quota, so
@@ -271,10 +273,10 @@ export class KiroUsageService {
 
   async get(
     connection: KiroConnectionOptions,
-    signal: AbortSignal,
+    signal?: AbortSignal,
     force = false,
   ): Promise<KiroUsage> {
-    const token = await this.options.resolveToken(connection, signal)
+    const token = await this.options.resolveToken(connection, signal ?? AbortSignal.timeout(USAGE_ATTEMPT_TIMEOUT_MS))
     const key = this.key(connection, token)
     const cached = this.cache.get(key)
     if (!force && cached !== undefined && cached.expiresAt > Date.now()) return cached.usage
@@ -292,14 +294,14 @@ export class KiroUsageService {
       ...profileArn === undefined ? {} : { profileArn },
     })
     const commonHeaders = headers(token)
-    const attempts: (() => Promise<{ status: number; body: unknown }>)[] = [
-      () => this.getRequest(
+    const attempts: ((attemptSignal: AbortSignal) => Promise<{ status: number; body: unknown }>)[] = [
+      (attemptSignal) => this.getRequest(
         `https://codewhisperer.${region}.amazonaws.com/getUsageLimits?${codeWhispererQuery.toString()}`,
         commonHeaders,
         connection.proxyUrl,
-        signal,
+        attemptSignal,
       ),
-      () => this.postRequest(
+      (attemptSignal) => this.postRequest(
         `https://codewhisperer.${region}.amazonaws.com`,
         { origin: 'AI_EDITOR', resourceType: 'AGENTIC_REQUEST', ...profileArn === undefined ? {} : { profileArn } },
         {
@@ -308,27 +310,27 @@ export class KiroUsageService {
           'x-amz-target': 'AmazonCodeWhispererService.GetUsageLimits',
         },
         connection.proxyUrl,
-        signal,
+        attemptSignal,
       ),
-      () => this.getRequest(
+      (attemptSignal) => this.getRequest(
         `https://q.${region}.amazonaws.com/getUsageLimits?${qQuery.toString()}`,
         commonHeaders,
         connection.proxyUrl,
-        signal,
+        attemptSignal,
       ),
     ]
     let lastStatus = 0
     let lastError: unknown
     for (const attempt of attempts) {
       try {
-        const response = await attempt()
+        const response = await attempt(signal ?? AbortSignal.timeout(USAGE_ATTEMPT_TIMEOUT_MS))
         lastStatus = response.status
         if (response.status !== 200) continue
         const usage = parseKiroUsage(response.body)
         this.cache.set(key, { expiresAt: Date.now() + this.cacheTtlMs, usage })
         return usage
       } catch (error: unknown) {
-        if (signal.aborted) throw error
+        if (signal?.aborted === true) throw error
         lastError = error
       }
     }
