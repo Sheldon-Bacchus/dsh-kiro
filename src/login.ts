@@ -488,8 +488,8 @@ export async function importApiKey(
   const response = await requestGet(url.toString(), {
     authorization: `Bearer ${accessToken}`,
     TokenType: 'API_KEY',
-    'user-agent': 'aws-sdk-js/3.738.0 KiroIDE',
-    'x-amz-user-agent': 'aws-sdk-js/3.738.0 KiroIDE',
+    'user-agent': 'aws-sdk-js/3.738.0 KiroIDE-1.0.0',
+    'x-amz-user-agent': 'aws-sdk-js/3.738.0 KiroIDE-1.0.0',
   }, signal)
   const models = record(response.body)?.models
   if (response.status !== 200 || !Array.isArray(models) || models.length === 0) {

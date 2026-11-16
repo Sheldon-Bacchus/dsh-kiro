@@ -50,7 +50,7 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000
 /** Timeout code distinguishing watchdog expiry from caller cancellation. */
 const STREAM_IDLE_TIMEOUT_CODE = 'LLM_STREAM_IDLE_TIMEOUT'
 /** User agent Kiro's own IDE sends; the service gates model access on it. */
-const KIRO_USER_AGENT = 'aws-sdk-js/3.738.0 KiroIDE'
+const KIRO_USER_AGENT = 'aws-sdk-js/3.738.0 KiroIDE-1.0.0'
 const CODEWHISPERER_TARGET = 'AmazonCodeWhispererStreamingService.GenerateAssistantResponse'
 
 const OFF = ReasoningEffortId('off')
