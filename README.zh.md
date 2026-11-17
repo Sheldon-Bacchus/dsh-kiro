@@ -157,6 +157,7 @@ llm-kiro:
 | `streamIdleTimeoutMs` | `300000` | provider 单次读取允许的最大空闲时间。 |
 | `tokenExpiryBufferMs` | `300000` | 提前多久刷新 access token。 |
 | `retryPolicy` | 有界常规策略 | 由 `dsh-llm-retry` 执行的 provider 重试策略。 |
+| `createResponseApi` | `auto` | 客户端通道模式：`auto`（探测 `featureConfiguration` 并在产出前失败时回退）、`on`（强制 `/v1/responses`）或 `off`（永远使用 `/generateAssistantResponse`）。 |
 
 若需要把配置固定到单个 profile，可在 `$DSH_HOME/profiles/<名称>/cordis.patch.yml` 按 id 覆盖：
 
@@ -279,6 +280,12 @@ Harness 在 `min(W × thresholdRatio, W − O − headroom)` 处触发压缩，�
 ## 为什么部分 Claude 路由需要代理
 
 Kiro 可能同时按账号权益与请求出口授权模型系列。未授权出口下，`claude-*` 可能返回 `INVALID_MODEL`，而开放权重模型仍可工作。需要时可用 `proxyUrl` 提供合适出口。代理使用 HTTP `CONNECT`，TLS 在隧道内协商，因此代理能看到目标主机名，但看不到 bearer token 或请求正文。
+
+## Kiro 客户端通道
+
+如果请求持续返回 HTTP 429 `"Too many requests..."` 但账号额度并没有减少，说明该账号已被划入 Kiro 的 `create_response_api` 实验队列。Kiro 通过 `GET https://runtime.<region>.kiro.dev/featureConfiguration` 为账号下发实验开关；被划入 `create_response_api` 队列的账号继续请求老端点 `/generateAssistantResponse` 会恒定返回 429，官方 IDE 会改走 `POST https://runtime.<region>.kiro.dev/v1/responses`（CreateResponse，必须设置 `stream=true`，且请求体中必须携带 `profileArn`）。
+
+本插件默认将 `createResponseApi` 设为 `auto`：自动探测 `featureConfiguration`（按账号缓存 15 分钟、失败缓存 60 秒、超时 5 秒），命中时走 `/v1/responses` 新通道，未命中或新通道在产出任何内容前失败则自动回退到老端点 `/generateAssistantResponse`；设为 `on` 会强制使用新通道，`off` 则永远使用老端点。
 
 ## 错误
 

@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   BlockAssembler,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
   createAssistantMessage,
   createToolResultMessage,
   createUserMessage,
   LlmError,
+  QUOTA_EXCEEDED_CODE,
   ToolCallId,
 } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -23,6 +25,7 @@ import {
   featureConfigEndpoint,
   parseCreateResponseError,
   probeFeatureConfiguration,
+  streamCreateResponse,
   translateCreateResponseSse,
 } from '../src/create-response.ts'
 import { serializeRequest } from '../src/serialize.ts'
@@ -280,6 +283,127 @@ describe('CreateResponse (a) SSE parser and error normalization', () => {
     )
     expect(overflow.code).toBe('CONTEXT_WINDOW_EXCEEDED')
   })
+
+  it('normalizes {error:{message,type,param,code}} responses for rate_limit_exceeded, too_many_requests, 500/503, context_length_exceeded, and other mapped tags', async () => {
+    const cases: {
+      status: number
+      body: unknown
+      expectedCode: string
+      expectedMessage: string
+    }[] = [
+      {
+        status: 429,
+        body: { error: { message: 'Too many requests...', type: 'too_many_requests', param: null, code: 'rate_limit_exceeded' } },
+        expectedCode: 'RATE_LIMIT',
+        expectedMessage: 'Too many requests...',
+      },
+      {
+        status: 429,
+        body: { error: { message: 'Too many requests (type only)', type: 'too_many_requests', param: null, code: null } },
+        expectedCode: 'RATE_LIMIT',
+        expectedMessage: 'Too many requests (type only)',
+      },
+      {
+        status: 500,
+        body: { error: { message: 'Internal failure', type: 'server_error', param: null, code: 'internal_error' } },
+        expectedCode: 'SERVER',
+        expectedMessage: 'Internal failure',
+      },
+      {
+        status: 500,
+        body: { error: { message: 'Unhandled 500', type: 'unexpected', param: null, code: 'unexpected' } },
+        expectedCode: 'SERVER',
+        expectedMessage: 'Unhandled 500',
+      },
+      {
+        status: 503,
+        body: { error: { message: 'Service unavailable', type: 'api_error', param: null, code: null } },
+        expectedCode: 'SERVER',
+        expectedMessage: 'Service unavailable',
+      },
+      {
+        status: 400,
+        body: { error: { message: 'Context window full', type: 'invalid_request_error', param: 'input', code: 'context_length_exceeded' } },
+        expectedCode: CONTEXT_WINDOW_EXCEEDED_CODE,
+        expectedMessage: 'Context window full',
+      },
+      {
+        status: 429,
+        body: { error: { message: 'Plan exhausted', type: 'insufficient_quota', param: null, code: 'insufficient_quota' } },
+        expectedCode: QUOTA_EXCEEDED_CODE,
+        expectedMessage: 'Plan exhausted',
+      },
+      {
+        status: 401,
+        body: { error: { message: 'Bad token', type: 'authentication_error', param: null, code: 'unauthorized' } },
+        expectedCode: 'AUTH',
+        expectedMessage: 'Bad token',
+      },
+      {
+        status: 403,
+        body: { error: { message: 'No access', type: 'permission_error', param: null, code: 'forbidden' } },
+        expectedCode: 'FORBIDDEN',
+        expectedMessage: 'No access',
+      },
+      {
+        status: 404,
+        body: { error: { message: 'Unknown model', type: 'invalid_request_error', param: 'model', code: 'model_not_found' } },
+        expectedCode: 'INVALID_MODEL',
+        expectedMessage: 'Unknown model',
+      },
+      {
+        status: 400,
+        body: { error: { message: 'Malformed payload', type: 'invalid_request_error', param: 'input', code: 'invalid_request' } },
+        expectedCode: 'INVALID_REQUEST',
+        expectedMessage: 'Malformed payload',
+      },
+      {
+        status: 418,
+        body: { error: { message: 'Teapot', type: 'custom_type', param: null, code: 'custom_code' } },
+        expectedCode: 'HTTP_418',
+        expectedMessage: 'Teapot',
+      },
+    ]
+
+    for (const c of cases) {
+      const err = parseCreateResponseError(c.status, JSON.stringify(c.body))
+      expect(err).toBeInstanceOf(LlmError)
+      expect(err.code).toBe(c.expectedCode)
+      expect(err.message).toBe(c.expectedMessage)
+      expect(err.failure.status).toBe(c.status)
+    }
+
+    // Also verify non-JSON 500/503 map to SERVER and streamCreateResponse surfaces parsed error.
+    expect(parseCreateResponseError(500, 'Bad Gateway').code).toBe('SERVER')
+    expect(parseCreateResponseError(503, '<html>Unavailable</html>').code).toBe('SERVER')
+
+    const wire = serializeRequest(
+      { provider: 'kiro', model: 'claude-sonnet-4.5', messages: [user('hi')] },
+      {},
+      'conv-err',
+      PROFILE_ARN,
+    )
+    await expect(collectChunks(streamCreateResponse({
+      token: makeToken(),
+      region: 'us-east-1',
+      profileArn: PROFILE_ARN,
+      wireRequest: wire,
+      signal: new AbortController().signal,
+      postRequest: async () => ({
+        status: 429,
+        headers: { 'x-request-id': 'req-stream-429' },
+        body: (async function* () {
+          yield new TextEncoder().encode(JSON.stringify({
+            error: { message: 'Too many requests...', type: 'too_many_requests', param: null, code: 'rate_limit_exceeded' },
+          }))
+        })(),
+      }),
+    }))).rejects.toMatchObject({
+      code: 'RATE_LIMIT',
+      message: 'Too many requests...',
+      failure: expect.objectContaining({ status: 429, requestId: 'req-stream-429' }),
+    })
+  })
 })
 
 describe('CreateResponse (b) request conversion and headers', () => {
@@ -385,6 +509,56 @@ describe('CreateResponse (b) request conversion and headers', () => {
     expect(createResponseTokenTypeHeaders(makeToken({ authMethod: 'idc' }))).toEqual({ TokenType: 'SSO_OIDC' })
     expect(createResponseTokenTypeHeaders(makeToken({ authMethod: 'api_key' }))).toEqual({ TokenType: 'API_KEY' })
     expect(createResponseTokenTypeHeaders(makeToken({ authMethod: 'external_idp' }))).toEqual({ TokenType: 'EXTERNAL_IDP' })
+  })
+
+  it('includes profileArn in request body when wire.profileArn is set and omits the key when absent', async () => {
+    const baseReq = {
+      provider: 'kiro' as const,
+      model: 'claude-sonnet-4.5',
+      messages: [user('hello')],
+    }
+
+    const wireWithProfile = serializeRequest(baseReq, {}, 'conv-with-arn', PROFILE_ARN)
+    const convertedWithProfile = convertWireRequestToCreateResponse(wireWithProfile)
+    expect(Object.hasOwn(convertedWithProfile, 'profileArn')).toBe(true)
+    expect(convertedWithProfile.profileArn).toBe(PROFILE_ARN)
+
+    const wireWithoutProfile = serializeRequest(baseReq, {}, 'conv-without-arn', undefined)
+    const convertedWithoutProfile = convertWireRequestToCreateResponse(wireWithoutProfile)
+    expect(Object.hasOwn(convertedWithoutProfile, 'profileArn')).toBe(false)
+    expect(convertedWithoutProfile.profileArn).toBeUndefined()
+
+    const sentBodies: Record<string, unknown>[] = []
+    const okStream = async (req: TransportRequest): Promise<TransportResponse> => {
+      sentBodies.push(JSON.parse(req.body) as Record<string, unknown>)
+      return {
+        status: 200,
+        headers: {},
+        body: chunkBytes(sseBytes([
+          { event: 'response.output_text.delta', data: { type: 'response.output_text.delta', delta: 'ok' } },
+          { event: 'response.completed', data: { type: 'response.completed', response: { status: 'completed' } } },
+        ]), 64),
+      }
+    }
+
+    await collectChunks(streamCreateResponse({
+      token: makeToken(),
+      region: 'us-east-1',
+      profileArn: PROFILE_ARN,
+      wireRequest: wireWithProfile,
+      signal: new AbortController().signal,
+      postRequest: okStream,
+    }))
+    await collectChunks(streamCreateResponse({
+      token: makeToken({ profileArn: undefined }),
+      region: 'us-east-1',
+      wireRequest: wireWithoutProfile,
+      signal: new AbortController().signal,
+      postRequest: okStream,
+    }))
+
+    expect(sentBodies[0]?.profileArn).toBe(PROFILE_ARN)
+    expect(Object.hasOwn(sentBodies[1] ?? {}, 'profileArn')).toBe(false)
   })
 })
 
@@ -534,6 +708,80 @@ describe('CreateResponse (c) probe cache, mode switch, and fallback', () => {
     })
     expect(ok).toBe(true)
     expect(calls).toBe(2)
+  })
+
+  it('treats probe exceptions and timeouts as false and caches the failure for 60 seconds', async () => {
+    let clock = 3_000_000
+    let errorCalls = 0
+    const errToken = makeToken({ accountId: 'acc-probe-throw' })
+    const throwingRequest = async () => {
+      errorCalls += 1
+      if (errorCalls === 1) throw new Error('ECONNRESET')
+      return { status: 200, body: { configuration: { enabled: true } } }
+    }
+
+    expect(await probeFeatureConfiguration({
+      token: errToken,
+      profileArn: PROFILE_ARN,
+      region: 'us-east-1',
+      requestJson: throwingRequest,
+      now: () => clock,
+    })).toBe(false)
+    expect(errorCalls).toBe(1)
+
+    // Failure cache holds for 60s without re-probing.
+    clock += FEATURE_CONFIG_FAILURE_TTL_MS - 1_000
+    expect(await probeFeatureConfiguration({
+      token: errToken,
+      profileArn: PROFILE_ARN,
+      region: 'us-east-1',
+      requestJson: throwingRequest,
+      now: () => clock,
+    })).toBe(false)
+    expect(errorCalls).toBe(1)
+
+    // After 60s expiry, probe retries and succeeds.
+    clock += 2_000
+    expect(await probeFeatureConfiguration({
+      token: errToken,
+      profileArn: PROFILE_ARN,
+      region: 'us-east-1',
+      requestJson: throwingRequest,
+      now: () => clock,
+    })).toBe(true)
+    expect(errorCalls).toBe(2)
+
+    // Timeout (when caller signal is not aborted) also resolves to false and caches for 60s.
+    let timeoutCalls = 0
+    const timeoutToken = makeToken({ accountId: 'acc-probe-timeout' })
+    const timedOut = await probeFeatureConfiguration({
+      token: timeoutToken,
+      profileArn: PROFILE_ARN,
+      region: 'us-east-1',
+      timeoutMs: 15,
+      now: () => clock,
+      requestJson: (_url, _headers, _proxy, probeSignal) => new Promise((_resolve, reject) => {
+        timeoutCalls += 1
+        probeSignal?.addEventListener('abort', () => {
+          reject(probeSignal.reason ?? new Error('TimeoutError'))
+        }, { once: true })
+      }),
+    })
+    expect(timedOut).toBe(false)
+    expect(timeoutCalls).toBe(1)
+
+    clock += FEATURE_CONFIG_FAILURE_TTL_MS - 1_000
+    expect(await probeFeatureConfiguration({
+      token: timeoutToken,
+      profileArn: PROFILE_ARN,
+      region: 'us-east-1',
+      now: () => clock,
+      requestJson: async () => {
+        timeoutCalls += 1
+        return { status: 200, body: { configuration: { enabled: true } } }
+      },
+    })).toBe(false)
+    expect(timeoutCalls).toBe(1)
   })
 })
 
@@ -690,5 +938,266 @@ describe('CreateResponse (c) adapter routing & fallback with fake transport', ()
 
     vi.doUnmock('../src/transport.ts')
     vi.resetModules()
+  })
+
+  async function withMockedLegacyTransport(
+    fn: (ctx: {
+      legacyPosts: RecordedPost[]
+      legacyQueue: (() => Promise<TransportResponse>)[]
+      makeAdapter: (opts?: {
+        mode?: 'auto' | 'on' | 'off'
+        probeFeatureConfig?: NonNullable<ConstructorParameters<typeof KiroAdapter>[0]['probeFeatureConfig']>
+        postCreateResponse?: NonNullable<ConstructorParameters<typeof KiroAdapter>[0]['postCreateResponse']>
+        logDebug?: (msg: string) => void
+      }) => KiroAdapter
+    }) => Promise<void>,
+  ): Promise<void> {
+    const { vi } = await import('vitest')
+    vi.resetModules()
+
+    const legacyPosts: RecordedPost[] = []
+    const legacyQueue: (() => Promise<TransportResponse>)[] = []
+
+    vi.doMock('../src/transport.ts', () => ({
+      getJson: async (url: string) => {
+        throw new Error(`unexpected un-injected GET ${url}`)
+      },
+      post: async (req: TransportRequest) => {
+        legacyPosts.push({ url: req.url, headers: req.headers, body: req.body })
+        const next = legacyQueue.shift()
+        if (next === undefined) throw new Error(`unexpected POST ${req.url}`)
+        return next()
+      },
+      parseProxyUrl: (raw: string) => new URL(raw),
+      postJson: async () => ({ status: 200, body: {} }),
+      postJsonWithHeaders: async () => ({ status: 200, body: {} }),
+      postForm: async () => ({ status: 200, body: {} }),
+    }))
+
+    try {
+      const { KiroAdapter: MockedAdapter } = await import('../src/adapter.ts')
+      const { clearFeatureConfigCache: clearCache } = await import('../src/create-response.ts')
+      clearCache()
+
+      const makeAdapter = (opts: {
+        mode?: 'auto' | 'on' | 'off'
+        probeFeatureConfig?: NonNullable<ConstructorParameters<typeof KiroAdapter>[0]['probeFeatureConfig']>
+        postCreateResponse?: NonNullable<ConstructorParameters<typeof KiroAdapter>[0]['postCreateResponse']>
+        logDebug?: (msg: string) => void
+      } = {}) => new MockedAdapter({
+        options: () => makeConnection(opts.mode === undefined ? {} : { createResponseApi: opts.mode }),
+        resolveToken: async () => makeToken(),
+        ...opts.probeFeatureConfig === undefined ? {} : { probeFeatureConfig: opts.probeFeatureConfig },
+        ...opts.postCreateResponse === undefined ? {} : { postCreateResponse: opts.postCreateResponse },
+        ...opts.logDebug === undefined ? {} : { logDebug: opts.logDebug },
+      }) as unknown as KiroAdapter
+
+      await fn({ legacyPosts, legacyQueue, makeAdapter })
+    } finally {
+      vi.doUnmock('../src/transport.ts')
+      vi.resetModules()
+    }
+  }
+
+  function legacyOkResponse(text: string): () => Promise<TransportResponse> {
+    return async () => ({
+      status: 200,
+      headers: {},
+      body: (async function* () {
+        yield join(textFrame(text), metadataFrame({ outputTokens: 2 }))
+      })(),
+    })
+  }
+
+  it('routes auto mode directly to legacy generateAssistantResponse when featureConfiguration probe returns false', async () => {
+    await withMockedLegacyTransport(async ({ legacyPosts, legacyQueue, makeAdapter }) => {
+      let probeCalls = 0
+      let createResponseCalls = 0
+      legacyQueue.push(legacyOkResponse('legacy-probe-false'))
+
+      const adapter = makeAdapter({
+        mode: 'auto',
+        probeFeatureConfig: async () => {
+          probeCalls += 1
+          return { status: 200, body: { configuration: { f1: false, f2: false } } }
+        },
+        postCreateResponse: async () => {
+          createResponseCalls += 1
+          throw new Error('must not call /v1/responses when probe is false')
+        },
+      })
+
+      const chunks = await collectChunks(adapter.stream({
+        provider: 'kiro',
+        model: 'claude-sonnet-4.5',
+        messages: [user('hi')],
+      } as GenerateOptions))
+
+      expect(probeCalls).toBe(1)
+      expect(createResponseCalls).toBe(0)
+      expect(legacyPosts).toHaveLength(1)
+      expect(legacyPosts[0]?.url).toBe('https://q.us-east-1.amazonaws.com/generateAssistantResponse')
+      expect(chunks.some(c => c.type === 'text-delta' && c.text === 'legacy-probe-false')).toBe(true)
+    })
+  })
+
+  it('falls back to legacy generateAssistantResponse in auto mode when featureConfiguration probe throws instead of failing the turn', async () => {
+    await withMockedLegacyTransport(async ({ legacyPosts, legacyQueue, makeAdapter }) => {
+      let probeCalls = 0
+      let createResponseCalls = 0
+      legacyQueue.push(legacyOkResponse('legacy-probe-error'))
+
+      const adapter = makeAdapter({
+        mode: 'auto',
+        probeFeatureConfig: async () => {
+          probeCalls += 1
+          throw new Error('probe network failure')
+        },
+        postCreateResponse: async () => {
+          createResponseCalls += 1
+          throw new Error('must not call /v1/responses when probe throws')
+        },
+      })
+
+      const chunks = await collectChunks(adapter.stream({
+        provider: 'kiro',
+        model: 'claude-sonnet-4.5',
+        messages: [user('hi')],
+      } as GenerateOptions))
+
+      expect(probeCalls).toBe(1)
+      expect(createResponseCalls).toBe(0)
+      expect(legacyPosts).toHaveLength(1)
+      expect(legacyPosts[0]?.url).toBe('https://q.us-east-1.amazonaws.com/generateAssistantResponse')
+      expect(chunks.some(c => c.type === 'text-delta' && c.text === 'legacy-probe-error')).toBe(true)
+    })
+  })
+
+  it('falls back to legacy generateAssistantResponse in auto mode when streamCreateResponse throws before any chunk is emitted', async () => {
+    await withMockedLegacyTransport(async ({ legacyPosts, legacyQueue, makeAdapter }) => {
+      let createResponseCalls = 0
+      const debugLogs: string[] = []
+      legacyQueue.push(legacyOkResponse('legacy-after-prechunk-error'))
+
+      const adapter = makeAdapter({
+        mode: 'auto',
+        probeFeatureConfig: async () => ({ status: 200, body: { configuration: { f1: true } } }),
+        postCreateResponse: async () => {
+          createResponseCalls += 1
+          throw new Error('connection refused')
+        },
+        logDebug: (msg) => { debugLogs.push(msg) },
+      })
+
+      const chunks = await collectChunks(adapter.stream({
+        provider: 'kiro',
+        model: 'claude-sonnet-4.5',
+        messages: [user('hi')],
+      } as GenerateOptions))
+
+      expect(createResponseCalls).toBe(1)
+      expect(legacyPosts).toHaveLength(1)
+      expect(legacyPosts[0]?.url).toBe('https://q.us-east-1.amazonaws.com/generateAssistantResponse')
+      expect(chunks.some(c => c.type === 'text-delta' && c.text === 'legacy-after-prechunk-error')).toBe(true)
+      expect(debugLogs).toHaveLength(1)
+      expect(debugLogs[0]).toContain('falling back to generateAssistantResponse')
+    })
+  })
+
+  it('throws directly without fallback in auto mode when streamCreateResponse throws after emitting a chunk', async () => {
+    await withMockedLegacyTransport(async ({ legacyPosts, legacyQueue, makeAdapter }) => {
+      legacyQueue.push(legacyOkResponse('must-not-use-legacy'))
+
+      const adapter = makeAdapter({
+        mode: 'auto',
+        probeFeatureConfig: async () => ({ status: 200, body: { configuration: { f1: true } } }),
+        postCreateResponse: async () => ({
+          status: 200,
+          headers: {},
+          body: (async function* () {
+            yield sseBytes([
+              { event: 'response.output_text.delta', data: { type: 'response.output_text.delta', delta: 'partial' } },
+            ])
+            throw new Error('mid-stream reset')
+          })(),
+        }),
+      })
+
+      const yielded: StreamChunk[] = []
+      await expect((async () => {
+        for await (const chunk of adapter.stream({
+          provider: 'kiro',
+          model: 'claude-sonnet-4.5',
+          messages: [user('hi')],
+        } as GenerateOptions)) {
+          yielded.push(chunk)
+        }
+      })()).rejects.toMatchObject({ code: 'TRANSPORT' })
+
+      expect(yielded.some(c => c.type === 'text-delta' && c.text === 'partial')).toBe(true)
+      expect(legacyPosts).toHaveLength(0)
+    })
+  })
+
+  it('throws ABORTED directly without fallback in auto mode when caller signal is aborted during streamCreateResponse', async () => {
+    await withMockedLegacyTransport(async ({ legacyPosts, legacyQueue, makeAdapter }) => {
+      const controller = new AbortController()
+      legacyQueue.push(legacyOkResponse('must-not-use-legacy'))
+
+      const adapter = makeAdapter({
+        mode: 'auto',
+        probeFeatureConfig: async () => ({ status: 200, body: { configuration: { f1: true } } }),
+        postCreateResponse: async () => {
+          controller.abort('caller stopped')
+          throw new Error('aborted during post')
+        },
+      })
+
+      await expect(collectChunks(adapter.stream({
+        provider: 'kiro',
+        model: 'claude-sonnet-4.5',
+        messages: [user('hi')],
+        signal: controller.signal,
+      } as GenerateOptions))).rejects.toMatchObject({ code: 'ABORTED' })
+
+      expect(legacyPosts).toHaveLength(0)
+    })
+  })
+
+  it('throws directly without fallback when createResponseApi mode is on', async () => {
+    await withMockedLegacyTransport(async ({ legacyPosts, legacyQueue, makeAdapter }) => {
+      let probeCalls = 0
+      legacyQueue.push(legacyOkResponse('must-not-use-legacy'))
+
+      const adapter = makeAdapter({
+        mode: 'on',
+        probeFeatureConfig: async () => {
+          probeCalls += 1
+          return { status: 200, body: { configuration: { f1: false } } }
+        },
+        postCreateResponse: async () => ({
+          status: 500,
+          headers: {},
+          body: (async function* () {
+            yield new TextEncoder().encode(JSON.stringify({
+              error: { message: 'Upstream exploded', type: 'server_error', param: null, code: 'internal_error' },
+            }))
+          })(),
+        }),
+      })
+
+      await expect(collectChunks(adapter.stream({
+        provider: 'kiro',
+        model: 'claude-sonnet-4.5',
+        messages: [user('hi')],
+      } as GenerateOptions))).rejects.toMatchObject({
+        code: 'SERVER',
+        message: 'Upstream exploded',
+        failure: expect.objectContaining({ status: 500 }),
+      })
+
+      expect(probeCalls).toBe(0)
+      expect(legacyPosts).toHaveLength(0)
+    })
   })
 })

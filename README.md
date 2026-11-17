@@ -164,6 +164,7 @@ Every field is optional:
 | `streamIdleTimeoutMs` | `300000` | Maximum idle time while a provider read is outstanding. |
 | `tokenExpiryBufferMs` | `300000` | Refresh an access token this long before expiration. |
 | `retryPolicy` | bounded normal | Provider retry policy executed by `dsh-llm-retry`. |
+| `createResponseApi` | `auto` | Client channel mode: `auto` (probe `featureConfiguration` and fall back on pre-output failure), `on` (force `/v1/responses`), or `off` (always `/generateAssistantResponse`). |
 
 To pin values to one profile instead, patch the bundle row by id in `$DSH_HOME/profiles/<name>/cordis.patch.yml`:
 
@@ -305,6 +306,12 @@ so a Kiro-scoped policy has to name every model:
 ## Why some Claude routes need a proxy
 
 Kiro can authorize model families by request egress as well as account entitlement. From an unauthorized egress a `claude-*` model may fail with `INVALID_MODEL` while open-weight routes work. `proxyUrl` provides the required egress when applicable. The adapter uses an HTTP `CONNECT` tunnel with TLS negotiated inside it, so the proxy sees the target hostname but not the bearer token or request body.
+
+## Kiro client channel
+
+If requests fail with HTTP 429 `"Too many requests..."` even though your account quota has not decreased, the account has likely been placed in Kiro's `create_response_api` experiment cohort. Kiro distributes feature flags per account via `GET https://runtime.<region>.kiro.dev/featureConfiguration`; accounts assigned to `create_response_api` receive constant 429 responses on the legacy `/generateAssistantResponse` endpoint, while the official IDE routes them to `POST https://runtime.<region>.kiro.dev/v1/responses` (CreateResponse, which requires `stream=true` and `profileArn` in the request body).
+
+By default, `createResponseApi` is set to `auto`: the adapter probes `featureConfiguration` (cached per account for 15 minutes on success, 60 seconds on failure, with a 5-second timeout). When the flag is active it uses `/v1/responses`, and if the account is not in the cohort or the new channel fails before emitting any output, it automatically falls back to `/generateAssistantResponse`. Set `createResponseApi` to `on` to force the new channel, or `off` to always use the legacy endpoint.
 
 ## Errors
 
