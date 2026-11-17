@@ -395,7 +395,18 @@ function mapCreateResponseErrorCode(
     return QUOTA_EXCEEDED_CODE
   }
 
-  const normalizedTag = (errorCode ?? errorType ?? '').trim().toLowerCase()
+  // A response may carry both a code and a type; an unknown code must not mask a
+  // known type, so each candidate is tried in turn.
+  for (const candidate of [errorCode, errorType]) {
+    const mapped = mapErrorTag(candidate)
+    if (mapped !== undefined) return mapped
+  }
+  return mapStatusFallback(status, combined)
+}
+
+/** Map one upstream error tag (code or type) to this plugin error code. */
+function mapErrorTag(tag: string | undefined): string | undefined {
+  const normalizedTag = (tag ?? '').trim().toLowerCase()
   switch (normalizedTag) {
     case 'rate_limit_exceeded':
     case 'too_many_requests':
@@ -420,9 +431,12 @@ function mapCreateResponseErrorCode(
     case 'invalid_request_error':
       return 'INVALID_REQUEST'
     default:
-      break
+      return undefined
   }
+}
 
+/** Fall back to the HTTP status when no upstream error tag is recognized. */
+function mapStatusFallback(status: number, combined: string): string {
   if (status === 401) return 'AUTH'
   if (status === 403) return combined.includes('bearer token') ? 'AUTH' : 'FORBIDDEN'
   if (status === 402) return QUOTA_EXCEEDED_CODE
@@ -925,7 +939,12 @@ export async function* streamCreateResponse(
   params: StreamCreateResponseParams,
 ): AsyncGenerator<StreamChunk> {
   const postRequest = params.postRequest ?? defaultPost()
-  const payload = convertWireRequestToCreateResponse(params.wireRequest)
+  const converted = convertWireRequestToCreateResponse(params.wireRequest)
+  // The service answers 429 (not 400) when the body omits profileArn, so the
+  // header value is copied into the body whenever the wire request lacks it.
+  const payload = converted.profileArn === undefined && params.profileArn !== undefined
+    ? { ...converted, profileArn: params.profileArn }
+    : converted
   const response = await postRequest({
     url: createResponseEndpoint(params.region),
     headers: createResponseHeaders(params.token, params.profileArn),
