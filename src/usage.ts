@@ -239,6 +239,8 @@ function headers(token: KiroToken): Record<string, string> {
   }
 }
 
+/** Per-attempt budget for one usage request: the three endpoints are alternatives, not shares of one budget. */
+const USAGE_ATTEMPT_TIMEOUT_MS = 30_000
 /** Account-scoped five-minute usage cache with forced refresh support. */
 export class KiroUsageService {
   private readonly getRequest: UsageGetRequest
@@ -271,10 +273,10 @@ export class KiroUsageService {
 
   async get(
     connection: KiroConnectionOptions,
-    signal: AbortSignal,
+    signal?: AbortSignal,
     force = false,
   ): Promise<KiroUsage> {
-    const token = await this.options.resolveToken(connection, signal)
+    const token = await this.options.resolveToken(connection, signal ?? AbortSignal.timeout(USAGE_ATTEMPT_TIMEOUT_MS))
     const key = this.key(connection, token)
     const cached = this.cache.get(key)
     if (!force && cached !== undefined && cached.expiresAt > Date.now()) return cached.usage
@@ -292,14 +294,14 @@ export class KiroUsageService {
       ...profileArn === undefined ? {} : { profileArn },
     })
     const commonHeaders = headers(token)
-    const attempts: (() => Promise<{ status: number; body: unknown }>)[] = [
-      () => this.getRequest(
+    const attempts: ((attemptSignal: AbortSignal) => Promise<{ status: number; body: unknown }>)[] = [
+      (attemptSignal) => this.getRequest(
         `https://codewhisperer.${region}.amazonaws.com/getUsageLimits?${codeWhispererQuery.toString()}`,
         commonHeaders,
         connection.proxyUrl,
-        signal,
+        attemptSignal,
       ),
-      () => this.postRequest(
+      (attemptSignal) => this.postRequest(
         `https://codewhisperer.${region}.amazonaws.com`,
         { origin: 'AI_EDITOR', resourceType: 'AGENTIC_REQUEST', ...profileArn === undefined ? {} : { profileArn } },
         {
@@ -308,39 +310,51 @@ export class KiroUsageService {
           'x-amz-target': 'AmazonCodeWhispererService.GetUsageLimits',
         },
         connection.proxyUrl,
-        signal,
+        attemptSignal,
       ),
-      () => this.getRequest(
+      (attemptSignal) => this.getRequest(
         `https://q.${region}.amazonaws.com/getUsageLimits?${qQuery.toString()}`,
         commonHeaders,
         connection.proxyUrl,
-        signal,
+        attemptSignal,
       ),
     ]
     let lastStatus = 0
     let lastError: unknown
     for (const attempt of attempts) {
+      const budget = AbortSignal.timeout(USAGE_ATTEMPT_TIMEOUT_MS)
+      const attemptSignal = signal === undefined ? budget : AbortSignal.any([signal, budget])
       try {
-        const response = await attempt()
+        const response = await attempt(attemptSignal)
         lastStatus = response.status
         if (response.status !== 200) continue
         const usage = parseKiroUsage(response.body)
         this.cache.set(key, { expiresAt: Date.now() + this.cacheTtlMs, usage })
         return usage
       } catch (error: unknown) {
-        if (signal.aborted) throw error
+        if (signal !== undefined && signal.aborted) {
+          throw new LlmError('Kiro usage request was cancelled by its caller', 'ABORTED', { cause: error })
+        }
+        if (budget.aborted) {
+          lastError = new LlmError(`Kiro usage attempt timed out after ${String(USAGE_ATTEMPT_TIMEOUT_MS)}ms`, 'TIMEOUT', { cause: error })
+          continue
+        }
         lastError = error
       }
     }
+    const timedOut = lastError instanceof LlmError && lastError.code === 'TIMEOUT'
     const code = lastStatus === 401 ? 'AUTH'
       : lastStatus === 403 ? 'FORBIDDEN'
         : lastStatus === 429 ? 'RATE_LIMIT'
           : lastStatus >= 500 ? 'SERVER'
-            : 'TRANSPORT'
+            : timedOut ? 'TIMEOUT'
+              : 'TRANSPORT'
     throw new LlmError(
       lastStatus > 0
-        ? `Kiro usage is temporarily unavailable (HTTP ${lastStatus})`
-        : 'Kiro usage is temporarily unavailable',
+        ? `Kiro usage is temporarily unavailable (HTTP ${String(lastStatus)})`
+        : timedOut
+          ? `Kiro usage request timed out (${String(USAGE_ATTEMPT_TIMEOUT_MS)}ms per attempt)`
+          : 'Kiro usage is temporarily unavailable',
       code,
       { ...lastStatus > 0 ? { status: lastStatus } : {}, ...lastError === undefined ? {} : { cause: lastError } },
     )

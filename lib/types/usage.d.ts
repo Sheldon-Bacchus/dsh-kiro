@@ -57,5 +57,5 @@ export declare class KiroUsageService {
     private key;
     clear(): void;
     current(connection: KiroConnectionOptions): KiroUsage | undefined;
-    get(connection: KiroConnectionOptions, signal: AbortSignal, force?: boolean): Promise<KiroUsage>;
+    get(connection: KiroConnectionOptions, signal?: AbortSignal, force?: boolean): Promise<KiroUsage>;
 }
