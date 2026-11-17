@@ -83,6 +83,7 @@ export interface KiroToken {
   expiresAt: number
   authMethod: KiroAuthMethod
   profileArn?: string
+  accountId?: string
 }
 
 /** Everything token resolution needs, including injectable transports for tests and proxies. */
@@ -526,7 +527,7 @@ async function resolveStoredAccount(
   if (captured === null) {
     throw new LlmError('Kiro has no signed-in account; add one in Settings, Kiro', 'MISSING_CREDENTIAL')
   }
-  return resolveFromSource({
+  const token = await resolveFromSource({
     key: store.directory + '\u0000' + captured.accountId,
     directory: store.directory,
     read: async () => {
@@ -553,4 +554,5 @@ async function resolveStoredAccount(
       }
       : {},
   }, options)
+  return { ...token, accountId: captured.accountId }
 }

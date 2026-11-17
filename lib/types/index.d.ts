@@ -18,6 +18,7 @@ import '@deepseek-ai/dsh-settings';
 import z from '@deepseek-ai/schemastery';
 import type { RetryPolicyConfig } from '@deepseek-ai/dsh-llm';
 import type { KiroCatalogModel, KiroConnectionOptions } from './adapter.ts';
+import type { CreateResponseApiMode } from './create-response.ts';
 export { contextCapacity, DEFAULT_CONTEXT_WINDOW, DEFAULT_STREAM_IDLE_TIMEOUT_MS, KiroAdapter, httpErrorCode, } from './adapter.ts';
 export type { KiroAdapterOptions, KiroCatalogModel, KiroConnectionOptions } from './adapter.ts';
 export { clearTokenCache, DEFAULT_REGION, kiroAuthMethod, kiroCredentialDirectory, resolveToken, resolveTokenFromDirectories, resolveTokenFromStore, } from './auth.ts';
@@ -37,6 +38,8 @@ export { assertKiroRegion } from './region.ts';
 export { getJson, parseProxyUrl, postForm, postJson, postJsonWithHeaders } from './transport.ts';
 export { KiroUsageService, parseKiroUsage } from './usage.ts';
 export type { KiroUsage, KiroUsageRow, KiroUsageServiceOptions } from './usage.ts';
+export { clearFeatureConfigCache, convertWireRequestToCreateResponse, createResponseEndpoint, createResponseHeaders, createResponseTokenTypeHeaders, featureConfigCacheKey, featureConfigEndpoint, isCreateResponseFeatureEnabled, parseCreateResponseError, parseSseEvents, probeFeatureConfiguration, streamCreateResponse, translateCreateResponseSse, } from './create-response.ts';
+export type { CreateResponseApiMode, CreateResponseInputItem, CreateResponsePost, CreateResponseRequest, CreateResponseTool, FeatureConfigGetJson, FeatureConfigProbeParams, SseEvent, StreamCreateResponseParams, } from './create-response.ts';
 export { buildModelRequestFields } from './serialize.ts';
 export type { ModelLimits, RequestDefaults } from './serialize.ts';
 export type * from './types.ts';
@@ -82,6 +85,11 @@ export interface Config {
     tokenExpiryBufferMs: Volatile<number>;
     /** Provider-owned model-request retry policy; omission uses normal defaults. */
     retryPolicy: Volatile<RetryPolicyConfig | undefined>;
+    /**
+     * Transport mode for Kiro's `/v1/responses` endpoint (`auto` probes with
+     * fallback, `on` forces `/v1/responses`, `off` always uses legacy).
+     */
+    createResponseApi: Volatile<CreateResponseApiMode>;
 }
 /** Plain values accepted by the provider resolver. */
 export type Options = {
@@ -94,25 +102,27 @@ export declare const Config: z<Schemastery.ObjectS<NoInfer<{
     region: z<string, string, "volatile">;
     profileArn: z<string, string, "volatile">;
     thinking: z<"enabled" | "disabled", "enabled" | "disabled", "volatile">;
-    reasoningEffort: z<"off" | "low" | "medium" | "high" | "none" | "xhigh" | "max", "off" | "low" | "medium" | "high" | "none" | "xhigh" | "max", "volatile">;
+    reasoningEffort: z<"none" | "off" | "low" | "medium" | "high" | "xhigh" | "max", "none" | "off" | "low" | "medium" | "high" | "xhigh" | "max", "volatile">;
     defaultContextWindow: z<number, number, "volatile-defined">;
     maxContextWindow: z<number, number, "volatile">;
     models: z<NoInfer<KiroCatalogModel[]>, NoInfer<KiroCatalogModel[]>, "volatile-defined">;
     streamIdleTimeoutMs: z<number, number, "volatile-defined">;
     tokenExpiryBufferMs: z<number, number, "volatile-defined">;
     retryPolicy: z<NoInfer<RetryPolicyConfig>, NoInfer<RetryPolicyConfig>, "volatile">;
+    createResponseApi: z<"off" | "auto" | "on", "off" | "auto" | "on", "volatile-defined">;
 }>>, Schemastery.ObjectT<NoInfer<{
     proxyUrl: z<string, string, "volatile">;
     region: z<string, string, "volatile">;
     profileArn: z<string, string, "volatile">;
     thinking: z<"enabled" | "disabled", "enabled" | "disabled", "volatile">;
-    reasoningEffort: z<"off" | "low" | "medium" | "high" | "none" | "xhigh" | "max", "off" | "low" | "medium" | "high" | "none" | "xhigh" | "max", "volatile">;
+    reasoningEffort: z<"none" | "off" | "low" | "medium" | "high" | "xhigh" | "max", "none" | "off" | "low" | "medium" | "high" | "xhigh" | "max", "volatile">;
     defaultContextWindow: z<number, number, "volatile-defined">;
     maxContextWindow: z<number, number, "volatile">;
     models: z<NoInfer<KiroCatalogModel[]>, NoInfer<KiroCatalogModel[]>, "volatile-defined">;
     streamIdleTimeoutMs: z<number, number, "volatile-defined">;
     tokenExpiryBufferMs: z<number, number, "volatile-defined">;
     retryPolicy: z<NoInfer<RetryPolicyConfig>, NoInfer<RetryPolicyConfig>, "volatile">;
+    createResponseApi: z<"off" | "auto" | "on", "off" | "auto" | "on", "volatile-defined">;
 }>>, "plain">;
 /**
  * One resolution's complete request facts. Connection, proxy, and token-policy

@@ -18,6 +18,7 @@ export interface KiroToken {
     expiresAt: number;
     authMethod: KiroAuthMethod;
     profileArn?: string;
+    accountId?: string;
 }
 /** Everything token resolution needs, including injectable transports for tests and proxies. */
 export interface TokenSourceOptions {

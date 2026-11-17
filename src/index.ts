@@ -32,6 +32,7 @@ import type { AttachmentStore, KiroCatalogModel, KiroConnectionOptions } from '.
 import { kiroCredentialDirectory, resolveTokenFromDirectories } from './auth.ts'
 import { discoverKiroProfileArn, KiroModelDiscovery } from './discovery.ts'
 import { refreshKiroClientVersion } from './client-id.ts'
+import type { CreateResponseApiMode } from './create-response.ts'
 import { credentialDirectory } from './paths.ts'
 import { FileModelSettingsStore } from './model-settings.ts'
 import { assertKiroProfileArn } from './profile.ts'
@@ -124,6 +125,32 @@ export { assertKiroRegion } from './region.ts'
 export { getJson, parseProxyUrl, postForm, postJson, postJsonWithHeaders } from './transport.ts'
 export { KiroUsageService, parseKiroUsage } from './usage.ts'
 export type { KiroUsage, KiroUsageRow, KiroUsageServiceOptions } from './usage.ts'
+export {
+  clearFeatureConfigCache,
+  convertWireRequestToCreateResponse,
+  createResponseEndpoint,
+  createResponseHeaders,
+  createResponseTokenTypeHeaders,
+  featureConfigCacheKey,
+  featureConfigEndpoint,
+  isCreateResponseFeatureEnabled,
+  parseCreateResponseError,
+  parseSseEvents,
+  probeFeatureConfiguration,
+  streamCreateResponse,
+  translateCreateResponseSse,
+} from './create-response.ts'
+export type {
+  CreateResponseApiMode,
+  CreateResponseInputItem,
+  CreateResponsePost,
+  CreateResponseRequest,
+  CreateResponseTool,
+  FeatureConfigGetJson,
+  FeatureConfigProbeParams,
+  SseEvent,
+  StreamCreateResponseParams,
+} from './create-response.ts'
 export { buildModelRequestFields } from './serialize.ts'
 export type { ModelLimits, RequestDefaults } from './serialize.ts'
 export type * from './types.ts'
@@ -213,6 +240,11 @@ export interface Config {
   tokenExpiryBufferMs: Volatile<number>
   /** Provider-owned model-request retry policy; omission uses normal defaults. */
   retryPolicy: Volatile<RetryPolicyConfig | undefined>
+  /**
+   * Transport mode for Kiro's `/v1/responses` endpoint (`auto` probes with
+   * fallback, `on` forces `/v1/responses`, `off` always uses legacy).
+   */
+  createResponseApi: Volatile<CreateResponseApiMode>
 }
 
 /** Plain values accepted by the provider resolver. */
@@ -254,6 +286,7 @@ export const Config = z.object({
   streamIdleTimeoutMs: z.number().min(Number.MIN_VALUE).max(MAX_TIMER_DELAY_MS).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS).volatile(),
   tokenExpiryBufferMs: z.number().min(0).max(MAX_TIMER_DELAY_MS).default(DEFAULT_TOKEN_EXPIRY_BUFFER_MS).volatile(),
   retryPolicy: RetryPolicySchema.volatile(),
+  createResponseApi: z.union(['auto', 'on', 'off']).default('auto').volatile(),
 })
 
 /**
@@ -388,6 +421,10 @@ export function resolveAdapterOptions(config: Options): ResolvedKiroOptions {
       `llm-kiro: tokenExpiryBufferMs must be a non-negative finite number no greater than ${MAX_TIMER_DELAY_MS}`,
     )
   }
+  const createResponseApi = config.createResponseApi ?? 'auto'
+  if (createResponseApi !== 'auto' && createResponseApi !== 'on' && createResponseApi !== 'off') {
+    throw new Error('llm-kiro: createResponseApi must be "auto", "on", or "off"')
+  }
   return {
     ...config.proxyUrl === undefined ? {} : { proxyUrl: config.proxyUrl },
     ...region === undefined ? {} : { region },
@@ -404,6 +441,7 @@ export function resolveAdapterOptions(config: Options): ResolvedKiroOptions {
     streamIdleTimeoutMs,
     tokenExpiryBufferMs,
     retryPolicy: resolveRetryPolicy(config.retryPolicy, 'llm-kiro: retryPolicy'),
+    createResponseApi,
   }
 }
 
@@ -479,6 +517,7 @@ export function apply(ctx: Context, config: Config): void {
       const store = ctx.get('attachments') as AttachmentStore | undefined
       return typeof store?.readImageRequest === 'function' ? store : undefined
     },
+    logDebug: (message) => { ctx.logger?.debug?.(message) },
   })
   ctx.llm.registerConfigurableProviders([
     { provider: PROVIDER, displayName: 'Kiro', settingsNs: NS, settingsPath: [] },

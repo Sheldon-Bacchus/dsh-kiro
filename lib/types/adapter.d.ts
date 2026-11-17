@@ -12,6 +12,7 @@ import type { GenerateOptions, LlmModelInfo, LlmProviderInfo, LlmResolvedModelIn
 import type { ImageAttachmentRef, ImageMediaType, ImageRequestTarget } from '@deepseek-ai/dsh-attachment';
 import type { RequestDefaults } from './serialize.ts';
 import type { KiroToken } from './auth.ts';
+import type { CreateResponseApiMode, CreateResponsePost, FeatureConfigGetJson } from './create-response.ts';
 /** Default maximum idle interval while an outstanding provider read is pending. */
 export declare const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300000;
 /** Default combined request/response context capacity for a Kiro model. */
@@ -104,6 +105,12 @@ export interface KiroConnectionOptions {
     tokenExpiryBufferMs: number;
     /** Provider-owned model-request retry policy, already resolved. */
     retryPolicy: ResolvedRetryPolicy;
+    /**
+     * Transport channel mode for Kiro's `/v1/responses` endpoint: `'auto'` probes
+     * `featureConfiguration` with fallback, `'on'` forces `/v1/responses`, `'off'`
+     * always uses legacy `generateAssistantResponse`.
+     */
+    createResponseApi?: CreateResponseApiMode;
 }
 /** Constructor options: the operation-local resolution hooks the plugin owns. */
 export interface KiroAdapterOptions {
@@ -128,6 +135,12 @@ export interface KiroAdapterOptions {
      * one upstream.
      */
     resolveAttachments?: () => AttachmentStore | undefined;
+    /** Optional debug logger for fallback diagnostics. */
+    logDebug?: (message: string) => void;
+    /** Optional override for `featureConfiguration` GET requests (used in tests). */
+    probeFeatureConfig?: FeatureConfigGetJson;
+    /** Optional override for CreateResponse POST requests (used in tests). */
+    postCreateResponse?: CreateResponsePost;
 }
 /** The attachment-store surface this adapter uses: one call, by reference. */
 export interface AttachmentStore {

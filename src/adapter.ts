@@ -42,6 +42,8 @@ import { post } from './transport.ts'
 import { translate } from './translate.ts'
 import type { KiroToken } from './auth.ts'
 import { kiroUserAgent } from './client-id.ts'
+import { probeFeatureConfiguration, streamCreateResponse } from './create-response.ts'
+import type { CreateResponseApiMode, CreateResponsePost, FeatureConfigGetJson } from './create-response.ts'
 import { profileRegion } from './profile.ts'
 
 /** Default maximum idle interval while an outstanding provider read is pending. */
@@ -200,6 +202,12 @@ export interface KiroConnectionOptions {
   tokenExpiryBufferMs: number
   /** Provider-owned model-request retry policy, already resolved. */
   retryPolicy: ResolvedRetryPolicy
+  /**
+   * Transport channel mode for Kiro's `/v1/responses` endpoint: `'auto'` probes
+   * `featureConfiguration` with fallback, `'on'` forces `/v1/responses`, `'off'`
+   * always uses legacy `generateAssistantResponse`.
+   */
+  createResponseApi?: CreateResponseApiMode
 }
 
 /** Constructor options: the operation-local resolution hooks the plugin owns. */
@@ -228,6 +236,12 @@ export interface KiroAdapterOptions {
    * one upstream.
    */
   resolveAttachments?: () => AttachmentStore | undefined
+  /** Optional debug logger for fallback diagnostics. */
+  logDebug?: (message: string) => void
+  /** Optional override for `featureConfiguration` GET requests (used in tests). */
+  probeFeatureConfig?: FeatureConfigGetJson
+  /** Optional override for CreateResponse POST requests (used in tests). */
+  postCreateResponse?: CreateResponsePost
 }
 
 /** The attachment-store surface this adapter uses: one call, by reference. */
@@ -588,7 +602,7 @@ export class KiroAdapter extends LlmAdapter {
     const images = requestHasImages
       ? await prepareImages(options, this.config.resolveAttachments?.(), signal)
       : undefined
-    const body = JSON.stringify(serializeRequest(
+    const wireRequest = serializeRequest(
       options,
       connection.defaults,
       conversationIdFor(options.sessionId),
@@ -598,7 +612,51 @@ export class KiroAdapter extends LlmAdapter {
         ? undefined
         : { maxTokensBounds: selected.maxTokensBounds },
       images,
-    ))
+    )
+
+    const createResponseMode = connection.createResponseApi ?? 'auto'
+    const tryCreateResponse = createResponseMode === 'on'
+      ? true
+      : createResponseMode === 'auto'
+        ? await probeFeatureConfiguration({
+          token,
+          region,
+          signal,
+          ...profileArn === undefined ? {} : { profileArn },
+          ...connection.proxyUrl === undefined ? {} : { proxyUrl: connection.proxyUrl },
+          ...this.config.probeFeatureConfig === undefined ? {} : { requestJson: this.config.probeFeatureConfig },
+        })
+        : false
+
+    if (tryCreateResponse) {
+      let emitted = false
+      try {
+        for await (const chunk of streamCreateResponse({
+          token,
+          region,
+          wireRequest,
+          signal,
+          onActivity,
+          ...profileArn === undefined ? {} : { profileArn },
+          ...connection.proxyUrl === undefined ? {} : { proxyUrl: connection.proxyUrl },
+          ...this.config.postCreateResponse === undefined ? {} : { postRequest: this.config.postCreateResponse },
+        })) {
+          emitted = true
+          yield chunk
+        }
+        return
+      } catch (error: unknown) {
+        if (createResponseMode === 'on' || emitted || signal.aborted) {
+          throw error
+        }
+        const reason = error instanceof Error ? error.message : String(error)
+        this.config.logDebug?.(
+          `dsh-kiro: CreateResponse failed (${reason}), falling back to generateAssistantResponse`,
+        )
+      }
+    }
+
+    const body = JSON.stringify(wireRequest)
     const response = await post({
       url,
       headers: {

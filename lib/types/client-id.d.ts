@@ -4,5 +4,6 @@
  */
 import { getJson } from './transport.ts';
 export declare const KIRO_CLIENT_VERSION = "1.4.121";
+export declare function kiroClientVersion(): string;
 export declare function kiroUserAgent(): string;
 export declare function refreshKiroClientVersion(proxyUrl: string | undefined, request?: typeof getJson): Promise<void>;

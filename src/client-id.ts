@@ -10,6 +10,10 @@ const RELEASE_METADATA_URL = 'https://prod.download.desktop.kiro.dev/stable/meta
 
 let clientVersion = KIRO_CLIENT_VERSION
 
+export function kiroClientVersion(): string {
+  return clientVersion
+}
+
 export function kiroUserAgent(): string {
   return `aws-sdk-js/3.738.0 KiroIDE-${clientVersion}`
 }
